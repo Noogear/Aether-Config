@@ -1,12 +1,10 @@
 package com.aether.config.bind;
 
-import com.aether.config.annotation.Alias;
 import com.aether.config.annotation.Check;
 import com.aether.config.annotation.Header;
 import com.aether.config.annotation.PostLoad;
 import com.aether.config.annotation.PreLoad;
 import com.aether.config.annotation.Range;
-import com.aether.config.annotation.Template;
 import com.aether.config.annotation.Version;
 import com.aether.config.codec.CodecContext;
 import com.aether.config.codec.CodecRegistry;
@@ -181,28 +179,6 @@ public final class ObjectBinder {
         String primaryKey = prop.resolveKey(options.naming());
         String fullPath = section.fullPath(primaryKey);
         ConfigNode.MapEntry matched = section.node().entry(primaryKey);
-        String matchedKey = primaryKey;
-
-        if (matched == null && prop.alias() != null) {
-            Alias alias = prop.alias();
-            for (String aliasKey : alias.value()) {
-                ConfigNode.MapEntry candidate = section.node().entry(aliasKey);
-                if (candidate != null) {
-                    matched = candidate;
-                    matchedKey = aliasKey;
-                    if (alias.warnOnUse()) {
-                        section.diagnostics().warn(
-                                DiagnosticCategory.SCHEMA,
-                                candidate.keySpan(),
-                                section.fullPath(aliasKey),
-                                "Configuration key '" + aliasKey + "' is deprecated.",
-                                "Use '" + primaryKey + "' instead."
-                        );
-                    }
-                    break;
-                }
-            }
-        }
 
         Class<?> rawType = prop.rawType();
         if (matched == null || (matched.value() instanceof ConfigNode.NullNode && rawType != Optional.class)) {
@@ -215,17 +191,14 @@ public final class ObjectBinder {
 
         Object result;
         if (isNestedBindable(rawType)) {
-            result = bind(rawType, section.section(matchedKey), patchDoc, hookContext);
+            result = bind(rawType, section.section(primaryKey), patchDoc, hookContext);
         } else if (rawType == ConfigSection.class) {
-            result = section.section(matchedKey);
+            result = section.section(primaryKey);
         } else {
             ConfigValue val = new ConfigValue(section.source(), fullPath, matched.value(), section.diagnostics(), codecs);
             result = decodeWithRegistry(prop, val, pojoDefault);
         }
 
-        if (Map.class.isAssignableFrom(rawType)) {
-            result = applyTemplateIfPresent(prop, (Map<String, Object>) result, fullPath, patchDoc);
-        }
         result = validate(prop, result, matched.value().span(), fullPath, section.diagnostics());
         if (patchDoc != null) {
             attachCommentsIfAbsent(prop, fullPath, patchDoc);
@@ -259,7 +232,7 @@ public final class ObjectBinder {
                 return bind(rawType, ConfigSection.empty(section.source(), fullPath, section.diagnostics(), codecs), patchDoc, hookContext);
             }
             if (Map.class.isAssignableFrom(rawType)) {
-                return applyTemplateIfPresent(prop, new LinkedHashMap<>((Map<String, Object>) pojoDefault), fullPath, patchDoc);
+                return Collections.unmodifiableMap(new LinkedHashMap<>((Map<String, Object>) pojoDefault));
             }
             return pojoDefault;
         }
@@ -280,7 +253,7 @@ public final class ObjectBinder {
             return Set.of();
         }
         if (Map.class.isAssignableFrom(rawType)) {
-            return applyTemplateIfPresent(prop, new LinkedHashMap<>(), fullPath, patchDoc);
+            return Map.of();
         }
         if (isNestedBindable(rawType)) {
             return bind(rawType, ConfigSection.empty(section.source(), fullPath, section.diagnostics(), codecs), patchDoc, hookContext);
@@ -387,35 +360,6 @@ public final class ObjectBinder {
         return clamped;
     }
 
-    private Map<String, Object> applyTemplateIfPresent(
-            PropertySchema prop,
-            @Nullable Map<String, Object> map,
-            String fullPath,
-            @Nullable ConfigDocument patchDoc
-    ) {
-        Map<String, Object> mutable = map != null ? new LinkedHashMap<>(map) : new LinkedHashMap<>();
-        Type valType = TypeRef.typeArgument(prop.genericType(), 1);
-        if (valType == null) {
-            return Collections.unmodifiableMap(mutable);
-        }
-        Class<?> valClass = TypeRef.resolveRawType(valType);
-        Template template = valClass.getAnnotation(Template.class);
-        if (template == null) {
-            return Collections.unmodifiableMap(mutable);
-        }
-        String defaultKey = template.name();
-        if (template.value().shouldAdd(mutable.containsKey(defaultKey), mutable.isEmpty()) && isBindableObjectType(valClass)) {
-            ConfigSection emptySub = ConfigSection.empty("<template>", fullPath + "." + defaultKey,
-                    new ConfigDiagnostics(), codecs);
-            Object defaultEntry = bind(valClass, emptySub, null, null);
-            mutable.put(defaultKey, defaultEntry);
-            if (patchDoc != null) {
-                patchDoc.set(fullPath + "." + defaultKey, encodeToNode(defaultEntry));
-            }
-        }
-        return Collections.unmodifiableMap(mutable);
-    }
-
     private void patchMissingValue(PropertySchema prop, String fullPath, @Nullable Object value, ConfigDocument patchDoc) {
         if (value == null) {
             return;
@@ -453,29 +397,22 @@ public final class ObjectBinder {
         if (options.unknownKeyPolicy() == UnknownKeyPolicy.IGNORE || section.isEmpty()) {
             return;
         }
-        Set<String> allowedPrimary = new LinkedHashSet<>(props.size() + 1);
-        Set<String> accepted = new LinkedHashSet<>(props.size() * 2 + 1);
+        Set<String> allowed = new LinkedHashSet<>(props.size() + 1);
         if (section.basePath().isEmpty()) {
             Version typeVersion = ownerType.getAnnotation(Version.class);
             if (typeVersion != null && !typeVersion.key().isEmpty()) {
-                allowedPrimary.add(typeVersion.key());
-                accepted.add(typeVersion.key());
+                allowed.add(typeVersion.key());
             }
         }
         for (PropertySchema prop : props) {
-            String primary = prop.resolveKey(options.naming());
-            allowedPrimary.add(primary);
-            accepted.add(primary);
-            if (prop.alias() != null) {
-                Collections.addAll(accepted, prop.alias().value());
-            }
+            allowed.add(prop.resolveKey(options.naming()));
         }
         for (ConfigNode.MapEntry entry : section.node().entries().values()) {
             String key = entry.key();
-            if (accepted.contains(key)) {
+            if (allowed.contains(key)) {
                 continue;
             }
-            String suggestion = SpellingSuggester.suggest(key, allowedPrimary);
+            String suggestion = SpellingSuggester.suggest(key, allowed);
             String hint = suggestion != null ? "Did you mean '" + suggestion + "'?" : null;
             SourceSpan span = entry.keySpan().isKnown() ? entry.keySpan() : entry.value().span();
             String path = section.fullPath(key);

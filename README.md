@@ -74,7 +74,6 @@ public record AppConfig(
         @Comment("定时任务间隔")
         @Inline("支持 10 ticks = 0.5 秒")
         @Range(min = 1, max = 72000, clamp = true)
-        @Alias(value = {"tick-interval"}, warnOnUse = true)
         @Default("10")
         int intervalTicks,
 
@@ -163,7 +162,6 @@ public class LegacySettings {
 | `@Comment({"..."})` | 字段 / Record 组件 | 在配置键上方生成块注释 |
 | `@Inline({"..."})` | 字段 / Record 组件 | 在配置键或标量值右侧生成行内注释 |
 | `@Key("custom-key")` | 字段 / Record 组件 | 显式覆盖键名（跳过 `NamingStrategy` 转换） |
-| `@Alias(value = {...}, warnOnUse = false)` | 字段 / Record 组件 | 指定旧键名兼容回退；`warnOnUse = true` 时输出弃用提醒 |
 | `@Default("...")` | 字段 / Record 组件 | Record 组件缺失时的默认文本值（经由 `CodecRegistry` 解码） |
 | `@Range(min, max, clamp = true)` | 数值字段 / 组件 | 数值范围校验；`clamp = true` 自动截断并警告，`false` 报 `ERROR` |
 | `@NonBlank` | `String` 字段 / 组件 | 不允许为 `null` 或空白字符串 |
@@ -171,7 +169,6 @@ public class LegacySettings {
 | `@Check(MyValidator.class)` | 字段 / 组件 | 自定义实现 `Check.ConfigValidator<T>` 的校验与修正逻辑 |
 | `@Ignore` | POJO 字段 | 忽略该字段，不参与读取与写回 |
 | `@Version(value, key, autoBackup)` | 根类型 / 字段 / 组件 | 声明式架构版本号与自动备份开关 |
-| `@Template(value, name)` | Map 元素类型 | 控制 `Map<String, T>` 默认模板键策略：`FORCE` / `SMART` / `STRICT` |
 | `@DefaultResources({"..."})` | 目录条目类型 | 为 `DirectoryConfig` 声明默认释放的 Classpath 资源路径 |
 | `@PreLoad` / `@PostLoad` | 方法 | 绑定前/后的生命周期钩子（支持无参、`ConfigDiagnostics` 或自定义上下文参数） |
 
@@ -291,7 +288,7 @@ DirectoryConfig<ItemSpec> items = manager.directory(dataDir.resolve("items"))
                   "items/starter.yml")
         .load();
 
-ItemSpec item = items.getOrDefault("my_sword"); // 找不到时自动回退到 "default"
+ItemSpec item = items.get("my_sword");
 
 // 模式 B：自定义 Factory（适合多 pass 依赖解析或复杂分发）
 DirectoryConfig<MyProfile> profiles = manager.directory(dataDir.resolve("profiles"))

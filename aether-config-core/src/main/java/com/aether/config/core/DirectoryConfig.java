@@ -1,7 +1,6 @@
 package com.aether.config.core;
 
 import com.aether.config.annotation.DefaultResources;
-import com.aether.config.annotation.Template;
 import com.aether.config.bind.ObjectBinder;
 import com.aether.config.diagnostic.ConfigDiagnostics;
 import com.aether.config.diagnostic.ConfigException;
@@ -26,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Directory-backed configuration loading all matching files into a merged {@code Map<String, V>}
  * with incremental file-level caching, reflection or custom {@link EntryFactory} decoding,
- * duplicate key policies, and {@link Template} seeding.
+ * and duplicate key policies.
  */
 public final class DirectoryConfig<V> {
 
@@ -57,8 +56,6 @@ public final class DirectoryConfig<V> {
     private final @Nullable String[] defaultResourcePaths;
     private final DefaultSeedPolicy seedPolicy;
     private final DuplicateKeyPolicy duplicatePolicy;
-    private final @Nullable Template.Strategy templateStrategy;
-    private final String templateKey;
     private final @Nullable Object hookContext;
 
     private final FileCache fileCache = new FileCache();
@@ -78,8 +75,6 @@ public final class DirectoryConfig<V> {
         this.defaultResourcePaths = builder.defaultResourcePaths;
         this.seedPolicy = builder.seedPolicy;
         this.duplicatePolicy = builder.duplicatePolicy;
-        this.templateStrategy = builder.templateStrategy;
-        this.templateKey = builder.templateKey;
         this.hookContext = builder.hookContext;
     }
 
@@ -89,16 +84,6 @@ public final class DirectoryConfig<V> {
 
     public @Nullable V get(@Nullable String key) {
         return key != null ? mergedEntries.get().get(key) : null;
-    }
-
-    public @Nullable V getOrDefault(@Nullable String key) {
-        return getOrDefault(key, templateKey);
-    }
-
-    public @Nullable V getOrDefault(@Nullable String key, String fallbackKey) {
-        Map<String, V> map = mergedEntries.get();
-        V found = key != null ? map.get(key) : null;
-        return found != null ? found : map.get(fallbackKey);
     }
 
     public ConfigDiagnostics diagnostics() {
@@ -190,8 +175,6 @@ public final class DirectoryConfig<V> {
             }
         }
 
-        applyTemplateIfNeeded(merged, binder);
-
         if (diag.hasErrors() && manager.options().strictMode()) {
             lastDiagnostics.set(diag);
             if (initial) {
@@ -262,24 +245,6 @@ public final class DirectoryConfig<V> {
         return entries;
     }
 
-    private void applyTemplateIfNeeded(Map<String, V> merged, ObjectBinder binder) {
-        if (entryFactory != null || valueType == null) {
-            return;
-        }
-        Template ann = valueType.getAnnotation(Template.class);
-        Template.Strategy strategy = templateStrategy != null
-                ? templateStrategy
-                : (ann != null ? ann.value() : null);
-        if (strategy == null) {
-            return;
-        }
-        String key = ann != null && !ann.name().isEmpty() ? ann.name() : templateKey;
-        if (strategy.shouldAdd(merged.containsKey(key), merged.isEmpty())) {
-            ConfigSection empty = ConfigSection.empty("<template>", key, new ConfigDiagnostics(), binder.codecs());
-            merged.put(key, binder.bind(valueType, empty, null, hookContext));
-        }
-    }
-
     private void seedDefaults(ConfigDiagnostics diag) {
         String[] paths = defaultResourcePaths;
         if (paths == null && valueType != null) {
@@ -327,8 +292,6 @@ public final class DirectoryConfig<V> {
         private @Nullable String[] defaultResourcePaths;
         private DefaultSeedPolicy seedPolicy = DefaultSeedPolicy.ONLY_WHEN_EMPTY;
         private DuplicateKeyPolicy duplicatePolicy = DuplicateKeyPolicy.LAST_WRITE_WINS;
-        private @Nullable Template.Strategy templateStrategy;
-        private String templateKey = "default";
         private @Nullable Object hookContext;
 
         Builder(ConfigManager manager, Path directory) {
@@ -357,11 +320,6 @@ public final class DirectoryConfig<V> {
             return this;
         }
 
-        public Builder<V> recursive(boolean recursive) {
-            this.recursive = recursive;
-            return this;
-        }
-
         public Builder<V> rootKey(@Nullable String rootKey) {
             this.rootKey = rootKey;
             return this;
@@ -378,24 +336,8 @@ public final class DirectoryConfig<V> {
             return this;
         }
 
-        public Builder<V> resources(ResourceProvider provider) {
-            this.resourceProvider = provider;
-            return this;
-        }
-
-        public Builder<V> seedPolicy(DefaultSeedPolicy seedPolicy) {
-            this.seedPolicy = seedPolicy;
-            return this;
-        }
-
         public Builder<V> duplicatePolicy(DuplicateKeyPolicy duplicatePolicy) {
             this.duplicatePolicy = duplicatePolicy;
-            return this;
-        }
-
-        public Builder<V> template(Template.Strategy strategy, String defaultKey) {
-            this.templateStrategy = strategy;
-            this.templateKey = defaultKey;
             return this;
         }
 

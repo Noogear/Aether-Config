@@ -25,10 +25,6 @@ public final class NodeInterpolator {
     private final Function<String, @Nullable String> envLookup;
     private final Function<String, @Nullable String> sysLookup;
 
-    public NodeInterpolator(InterpolationMode mode) {
-        this(mode, System::getenv, System::getProperty);
-    }
-
     public NodeInterpolator(
             InterpolationMode mode,
             Function<String, @Nullable String> envLookup,

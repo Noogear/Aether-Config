@@ -11,12 +11,9 @@ import com.aether.config.node.ConfigNode;
 import com.aether.config.node.SourceSpan;
 import org.jetbrains.annotations.Nullable;
 
-import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -224,10 +221,6 @@ public final class ConfigSection {
         return value(path).asBigInteger(defaultValue);
     }
 
-    public @Nullable BigDecimal getBigDecimal(String path, @Nullable BigDecimal defaultValue) {
-        return value(path).asBigDecimal(defaultValue);
-    }
-
     public @Nullable Duration getDuration(String path, @Nullable Duration defaultValue) {
         return value(path).asDuration(defaultValue);
     }
@@ -277,22 +270,6 @@ public final class ConfigSection {
             }
         }
         return List.copyOf(result);
-    }
-
-    public <V> Map<String, V> decodeMap(String path, ConfigCodec<V> valueCodec) {
-        ConfigSection sub = section(path);
-        if (sub.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, V> result = new LinkedHashMap<>(sub.keys().size());
-        for (ConfigNode.MapEntry entry : sub.node().entries().values()) {
-            ConfigValue elemVal = new ConfigValue(source, sub.fullPath(entry.key()), entry.value(), diagnostics, codecs);
-            V decoded = elemVal.decode(valueCodec, null);
-            if (decoded != null) {
-                result.put(entry.key(), decoded);
-            }
-        }
-        return Collections.unmodifiableMap(result);
     }
 
     public void warnUnknownKeys(Set<String> allowedKeys) {

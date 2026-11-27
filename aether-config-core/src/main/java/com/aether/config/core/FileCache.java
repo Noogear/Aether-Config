@@ -55,13 +55,6 @@ public final class FileCache {
         return content;
     }
 
-    public @Nullable String readIfChanged(Path file) throws IOException {
-        if (isFresh(file)) {
-            return null;
-        }
-        return read(file);
-    }
-
     public void put(Path file, String content) throws IOException {
         Path norm = file.toAbsolutePath().normalize();
         long mtime = Files.isRegularFile(norm) ? Files.getLastModifiedTime(norm).toMillis() : 0L;

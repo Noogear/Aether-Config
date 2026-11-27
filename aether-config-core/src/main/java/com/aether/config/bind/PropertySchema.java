@@ -1,6 +1,5 @@
 package com.aether.config.bind;
 
-import com.aether.config.annotation.Alias;
 import com.aether.config.annotation.Check;
 import com.aether.config.annotation.Comment;
 import com.aether.config.annotation.Default;
@@ -41,7 +40,6 @@ public final class PropertySchema {
     private final Class<?> rawType;
     private final Type genericType;
     private final @Nullable Key keyAnnotation;
-    private final @Nullable Alias aliasAnnotation;
     private final @Nullable Default defaultAnnotation;
     private final @Nullable Comment commentAnnotation;
     private final @Nullable Inline inlineAnnotation;
@@ -68,7 +66,6 @@ public final class PropertySchema {
         this.rawType = rawType;
         this.genericType = genericType;
         this.keyAnnotation = getAnn(element, Key.class);
-        this.aliasAnnotation = getAnn(element, Alias.class);
         this.defaultAnnotation = getAnn(element, Default.class);
         this.commentAnnotation = getAnn(element, Comment.class);
         this.inlineAnnotation = getAnn(element, Inline.class);
@@ -184,10 +181,6 @@ public final class PropertySchema {
 
     public Type genericType() {
         return genericType;
-    }
-
-    public @Nullable Alias alias() {
-        return aliasAnnotation;
     }
 
     public @Nullable Default defaultValue() {

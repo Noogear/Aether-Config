@@ -155,10 +155,6 @@ public sealed interface ConfigNode permits
         public MapEntry withValue(ConfigNode newValue) {
             return new MapEntry(key, newValue, keyComments, keySpan);
         }
-
-        public MapEntry withKeyComments(NodeComments newKeyComments) {
-            return new MapEntry(key, value, newKeyComments, keySpan);
-        }
     }
 
     record MapNode(

@@ -123,15 +123,6 @@ public final class ConfigManager {
         );
     }
 
-    public <T> T loadSnapshot(Class<T> type, String sourceName, Reader reader, ConfigDiagnostics diagnostics) {
-        ConfigSection root = parseSection(sourceName, reader, diagnostics);
-        T value = binder.bind(type, root, null, null);
-        if (options.strictMode() && diagnostics.hasErrors()) {
-            throw new ConfigException("Configuration validation failed for " + sourceName, diagnostics);
-        }
-        return value;
-    }
-
     public ConfigSection parseSection(String sourceName, Reader reader, ConfigDiagnostics diagnostics) {
         ConfigNode.MapNode parsed = format.parse(sourceName, reader, diagnostics);
         ConfigNode.MapNode interpolated = interpolator.interpolate(parsed, diagnostics);

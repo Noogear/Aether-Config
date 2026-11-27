@@ -23,14 +23,6 @@ public record NodeComments(
         end = end == null || end.isEmpty() ? List.of() : List.copyOf(end);
     }
 
-    public static NodeComments ofBlock(List<String> block) {
-        return new NodeComments(block, List.of(), List.of());
-    }
-
-    public static NodeComments ofInline(List<String> inline) {
-        return new NodeComments(List.of(), inline, List.of());
-    }
-
     public boolean isEmpty() {
         return block.isEmpty() && inline.isEmpty() && end.isEmpty();
     }
@@ -41,9 +33,5 @@ public record NodeComments(
 
     public NodeComments withInline(List<String> inline) {
         return new NodeComments(this.block, inline, this.end);
-    }
-
-    public NodeComments withEnd(List<String> end) {
-        return new NodeComments(this.block, this.inline, end);
     }
 }

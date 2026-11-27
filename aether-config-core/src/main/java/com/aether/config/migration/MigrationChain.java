@@ -20,10 +20,6 @@ public final class MigrationChain {
         return new Builder();
     }
 
-    public static MigrationChain empty() {
-        return new MigrationChain(Map.of());
-    }
-
     public boolean isEmpty() {
         return steps.isEmpty();
     }

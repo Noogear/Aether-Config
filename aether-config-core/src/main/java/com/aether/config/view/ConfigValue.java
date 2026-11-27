@@ -279,10 +279,6 @@ public final class ConfigValue {
         }
     }
 
-    public @Nullable BigDecimal asBigDecimal(@Nullable BigDecimal defaultValue) {
-        return decode(BigDecimal.class, defaultValue);
-    }
-
     public @Nullable Duration asDuration(@Nullable Duration defaultValue) {
         return decode(Duration.class, defaultValue);
     }

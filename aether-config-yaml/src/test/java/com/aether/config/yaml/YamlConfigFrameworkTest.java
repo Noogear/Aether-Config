@@ -1,6 +1,5 @@
 package com.aether.config.yaml;
 
-import com.aether.config.annotation.Alias;
 import com.aether.config.annotation.Check;
 import com.aether.config.annotation.Comment;
 import com.aether.config.annotation.Default;
@@ -14,7 +13,6 @@ import com.aether.config.annotation.Pattern;
 import com.aether.config.annotation.PostLoad;
 import com.aether.config.annotation.PreLoad;
 import com.aether.config.annotation.Range;
-import com.aether.config.annotation.Template;
 import com.aether.config.annotation.Version;
 import com.aether.config.bind.SyncMode;
 import com.aether.config.bind.UnknownKeyPolicy;
@@ -66,7 +64,6 @@ class YamlConfigFrameworkTest {
             @Comment("Tick interval for periodic tasks")
             @Inline("10 ticks = 0.5s")
             @Range(min = 1, max = 72000, clamp = true)
-            @Alias(value = {"tick-interval"}, warnOnUse = true)
             @Default("10")
             int suctionIntervalTicks,
 
@@ -92,7 +89,6 @@ class YamlConfigFrameworkTest {
         }
     }
 
-    @Template(value = Template.Strategy.FORCE, name = "default")
     public static class ChestEntry {
         public String displayName = "Basic Chest";
         @Range(min = 1, max = 6, clamp = true)
@@ -114,7 +110,6 @@ class YamlConfigFrameworkTest {
     }
 
     @DefaultResources({"chests/starter.yml"})
-    @Template(value = Template.Strategy.FORCE, name = "default")
     public record DirectoryProfile(
             @Default("CHEST") String type,
             @Range(min = 1, max = 6, clamp = true) @Default("3") int rows
@@ -235,7 +230,10 @@ class YamlConfigFrameworkTest {
                 """, StandardCharsets.UTF_8);
 
         MigrationChain migrations = MigrationChain.builder()
-                .step(1, 2, doc -> doc.rename("old-db-host", "database.host"))
+                .step(1, 2, doc -> {
+                    doc.rename("old-db-host", "database.host");
+                    doc.rename("tick-interval", "suction-interval-ticks");
+                })
                 .build();
 
         ConfigManager manager = ConfigManager.builder()
@@ -247,7 +245,7 @@ class YamlConfigFrameworkTest {
         assertEquals("legacy.example.com", handle.get().database().host());
         assertEquals(25, handle.get().suctionIntervalTicks());
         assertTrue(handle.lastDiagnostics().entries().stream()
-                .anyMatch(e -> e.category() == DiagnosticCategory.SCHEMA && e.message().contains("deprecated")));
+                .anyMatch(e -> e.category() == DiagnosticCategory.MIGRATION));
 
         // Backup created under backups/
         Path backupDir = tempDir.resolve("backups");
@@ -296,7 +294,7 @@ class YamlConfigFrameworkTest {
                 .format(YamlFormat.create())
                 .build();
 
-        // 1. Reflection mode with @DefaultResources + @Template + ERROR_AND_SKIP duplicate policy
+        // 1. Reflection mode with @DefaultResources + ERROR_AND_SKIP duplicate policy
         DirectoryConfig<DirectoryProfile> profiles = manager.directory(dir)
                 .bind(DirectoryProfile.class)
                 .rootKey("chests")
@@ -313,9 +311,9 @@ class YamlConfigFrameworkTest {
                 })
                 .load();
 
-        assertEquals(2, profiles.all().size()); // starter + @Template("default")
+        assertEquals(1, profiles.all().size());
         assertEquals(4, profiles.get("starter").rows());
-        assertEquals(3, profiles.getOrDefault("nonexistent").rows());
+        assertNull(profiles.get("nonexistent"));
 
         // Add duplicate in nested file -> skipped with ERROR diagnostic
         Path nested = Files.createDirectories(dir.resolve("sub"));

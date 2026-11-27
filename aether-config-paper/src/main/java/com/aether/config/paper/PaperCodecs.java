@@ -52,7 +52,7 @@ public final class PaperCodecs {
                     throw new ConfigDecodeException("missing particle type");
                 }
                 try {
-                    return Particle.valueOf(name.toUpperCase(Locale.ROOT).replace('-', '_'));
+                    return Particle.valueOf(name.toUpperCase(Locale.ROOT));
                 } catch (IllegalArgumentException ex) {
                     throw new ConfigDecodeException("unknown Bukkit particle '" + name + "'");
                 }
@@ -107,14 +107,13 @@ public final class PaperCodecs {
             (color, ctx) -> ConfigNode.ScalarNode.of(String.format("#%08X", color.asARGB()))
     );
 
-    public static final ConfigCodec<Sound> SOUND = registryCodec(() -> Registry.SOUNDS, "sound", true);
+    public static final ConfigCodec<Sound> SOUND = registryCodec(() -> Registry.SOUNDS, "sound");
 
-    public static final ConfigCodec<PotionEffectType> POTION_EFFECT_TYPE = registryCodec(() -> Registry.MOB_EFFECT, "potion effect", false);
+    public static final ConfigCodec<PotionEffectType> POTION_EFFECT_TYPE = registryCodec(() -> Registry.MOB_EFFECT, "potion effect");
 
     private static <T extends org.bukkit.Keyed> ConfigCodec<T> registryCodec(
             Supplier<Registry<T>> registrySupplier,
-            String label,
-            boolean tryDotFallback
+            String label
     ) {
         return ConfigCodec.of(
                 val -> {
@@ -126,13 +125,8 @@ public final class PaperCodecs {
                         throw new ConfigDecodeException("Bukkit server not running; cannot resolve " + label + " '" + raw + "'");
                     }
                     Registry<T> registry = registrySupplier.get();
-                    String lower = raw.toLowerCase(Locale.ROOT);
-                    NamespacedKey exact = NamespacedKey.fromString(lower);
+                    NamespacedKey exact = NamespacedKey.fromString(raw.toLowerCase(Locale.ROOT));
                     T matched = exact != null ? registry.get(exact) : null;
-                    if (matched == null && tryDotFallback) {
-                        NamespacedKey dotted = NamespacedKey.fromString(lower.replace('_', '.'));
-                        matched = dotted != null ? registry.get(dotted) : null;
-                    }
                     if (matched == null) {
                         throw new ConfigDecodeException("unknown Bukkit " + label + " '" + raw + "'");
                     }

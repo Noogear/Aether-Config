@@ -19,10 +19,6 @@ public final class ConfigBackup {
     private ConfigBackup() {
     }
 
-    public static @Nullable Path backup(Path sourceFile) throws IOException {
-        return backup(sourceFile, null);
-    }
-
     public static @Nullable Path backup(Path sourceFile, @Nullable String label) throws IOException {
         if (Files.notExists(sourceFile)) {
             return null;
