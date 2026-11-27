@@ -1,0 +1,7 @@
+dependencies {
+    api project(':aether-config-core')
+    compileOnly 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+
+    testImplementation project(':aether-config-yaml')
+    testImplementation 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+}

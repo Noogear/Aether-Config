@@ -1,0 +1,4 @@
+dependencies {
+    api project(':aether-config-core')
+    api 'org.yaml:snakeyaml:2.2'
+}

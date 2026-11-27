@@ -1,0 +1,4 @@
+rootProject.name = 'aether-config'
+include 'aether-config-core'
+include 'aether-config-yaml'
+include 'aether-config-paper'

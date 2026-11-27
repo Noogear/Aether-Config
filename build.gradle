@@ -1,0 +1,48 @@
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+
+    group = 'com.aether'
+    version = rootProject.version
+
+    java {
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }
+        withSourcesJar()
+    }
+
+    repositories {
+        mavenCentral()
+        maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+    }
+
+    dependencies {
+        compileOnly 'org.jetbrains:annotations:24.1.0'
+
+        testImplementation 'org.jetbrains:annotations:24.1.0'
+        testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release.set(21)
+        options.compilerArgs.addAll(['-Xlint:unchecked', '-Xlint:deprecation'])
+    }
+
+    tasks.named('test') {
+        useJUnitPlatform()
+    }
+
+    publishing {
+        publications {
+            mavenJava(MavenPublication) {
+                from components.java
+            }
+        }
+        repositories {
+            mavenLocal()
+        }
+    }
+}
