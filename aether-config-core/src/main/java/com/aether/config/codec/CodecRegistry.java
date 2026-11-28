@@ -16,6 +16,7 @@ import java.net.URI;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -265,6 +266,33 @@ public final class CodecRegistry {
                 },
                 (u, ctx) -> ConfigNode.ScalarNode.of(u.toString())
         ));
+        register(Locale.class, ConfigCodec.of(
+                val -> {
+                    String s = requireScalarString(val, "Locale").trim().replace('-', '_');
+                    String[] parts = s.split("_", -1);
+                    if (parts.length == 1) {
+                        return Locale.of(parts[0]);
+                    }
+                    if (parts.length == 2) {
+                        return Locale.of(parts[0], parts[1]);
+                    }
+                    return Locale.of(parts[0], parts[1], parts[2]);
+                },
+                (loc, ctx) -> ConfigNode.ScalarNode.of(
+                        loc.getCountry().isEmpty() ? loc.getLanguage() : loc.getLanguage() + "_" + loc.getCountry()
+                )
+        ));
+        register(Instant.class, ConfigCodec.of(
+                val -> {
+                    String s = requireScalarString(val, "Instant");
+                    try {
+                        return Instant.parse(s.trim());
+                    } catch (DateTimeParseException ex) {
+                        throw new ConfigDecodeException("invalid ISO-8601 Instant '" + s + "'", ex);
+                    }
+                },
+                (inst, ctx) -> ConfigNode.ScalarNode.of(inst.toString())
+        ));
         register(ConfigSection.class, ConfigCodec.of(
                 ConfigValue::asSection,
                 (sec, ctx) -> sec.node()
@@ -275,7 +303,15 @@ public final class CodecRegistry {
         ));
         register(Object.class, ConfigCodec.of(
                 ConfigValue::raw,
-                (obj, ctx) -> ctx.encode(obj, obj != null ? obj.getClass() : Object.class)
+                (obj, ctx) -> {
+                    if (obj == null) {
+                        return ConfigNode.NullNode.INSTANCE;
+                    }
+                    if (obj.getClass() == Object.class) {
+                        return ConfigNode.ScalarNode.of(obj.toString());
+                    }
+                    return ctx.encode(obj, obj.getClass());
+                }
         ));
     }
 
@@ -345,10 +381,19 @@ public final class CodecRegistry {
                         List<ConfigNode> elems = listNode.elements();
                         for (int i = 0; i < elems.size(); i++) {
                             ConfigValue itemVal = val.child("[" + i + "]", elems.get(i));
-                            if (elemCodec != null) {
-                                out.add(elemCodec.decode(itemVal));
-                            } else {
-                                out.add(itemVal.raw());
+                            try {
+                                if (elemCodec != null) {
+                                    out.add(elemCodec.decode(itemVal));
+                                } else {
+                                    out.add(itemVal.raw());
+                                }
+                            } catch (ConfigDecodeException ex) {
+                                val.diagnostics().error(
+                                        com.aether.config.diagnostic.DiagnosticCategory.TYPE,
+                                        itemVal.span(),
+                                        itemVal.path(),
+                                        ex.getMessage()
+                                );
                             }
                         }
                         return isSet
@@ -394,21 +439,40 @@ public final class CodecRegistry {
                                     val.diagnostics(),
                                     reg
                             );
-                            Object decodedKey = keyCodec != null ? keyCodec.decode(kVal) : entry.key();
                             ConfigValue vVal = val.childKey(entry.key(), entry.value());
-                            Object decodedVal = valCodec != null ? valCodec.decode(vVal) : entry.value().rawValue();
-                            out.put(decodedKey, decodedVal);
+                            try {
+                                Object decodedKey = keyCodec != null ? keyCodec.decode(kVal) : entry.key();
+                                Object decodedVal = valCodec != null ? valCodec.decode(vVal) : entry.value().rawValue();
+                                out.put(decodedKey, decodedVal);
+                            } catch (ConfigDecodeException ex) {
+                                val.diagnostics().error(
+                                        com.aether.config.diagnostic.DiagnosticCategory.TYPE,
+                                        vVal.span(),
+                                        vVal.path(),
+                                        ex.getMessage()
+                                );
+                            }
                         }
                         return Collections.unmodifiableMap(out);
                     },
                     (mapObj, ctx) -> {
                         Map<?, ?> m = (Map<?, ?>) mapObj;
+                        ConfigCodec<Object> keyCodec = keyType != null
+                                ? (ConfigCodec<Object>) reg.find(keyType).orElse(null)
+                                : null;
                         List<ConfigNode.MapEntry> entries = new ArrayList<>(m.size());
                         for (Map.Entry<?, ?> e : m.entrySet()) {
                             if (e.getKey() == null) {
                                 continue;
                             }
-                            String kStr = e.getKey() instanceof Enum<?> en ? en.name() : String.valueOf(e.getKey());
+                            String kStr;
+                            if (keyCodec != null) {
+                                ConfigNode encodedKey = keyCodec.encode(e.getKey(), ctx);
+                                Object rawKey = encodedKey.rawValue();
+                                kStr = rawKey != null ? String.valueOf(rawKey) : String.valueOf(e.getKey());
+                            } else {
+                                kStr = e.getKey() instanceof Enum<?> en ? en.name() : String.valueOf(e.getKey());
+                            }
                             entries.add(ConfigNode.MapEntry.of(kStr, ctx.encode(e.getValue(), valType)));
                         }
                         return ConfigNode.MapNode.ofEntries(entries);

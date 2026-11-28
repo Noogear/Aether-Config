@@ -32,8 +32,10 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -48,6 +50,8 @@ public final class ConfigManager {
     private final BindOptions options;
     private final ObjectBinder binder;
     private final NodeInterpolator interpolator;
+    private final Function<String, @Nullable String> envLookup;
+    private final Function<String, @Nullable String> sysLookup;
     private final FileCache fileCache = new FileCache();
     private final Map<Class<?>, MigrationChain> migrations;
 
@@ -61,12 +65,36 @@ public final class ConfigManager {
                 builder.interpolation
         );
         this.binder = new ObjectBinder(builder.codecs, this.options);
+        this.envLookup = builder.envLookup;
+        this.sysLookup = builder.sysLookup;
         this.interpolator = new NodeInterpolator(builder.interpolation, builder.envLookup, builder.sysLookup);
         this.migrations = Map.copyOf(builder.migrations);
     }
 
     public static Builder builder() {
         return new Builder();
+    }
+
+    /**
+     * Creates a mutable {@link Builder} inheriting this manager's format, codecs, options, lookups, and migrations.
+     * Useful for addons to register private codecs/migrations without mutating the parent manager.
+     */
+    public Builder fork() {
+        return new Builder()
+                .format(this.format)
+                .codecsCopy(this.binder.codecs().copy())
+                .naming(this.options.naming())
+                .unknownKeys(this.options.unknownKeyPolicy())
+                .syncMode(this.options.syncMode())
+                .strictMode(this.options.strictMode())
+                .interpolation(this.options.interpolation())
+                .envLookup(this.envLookup)
+                .sysLookup(this.sysLookup)
+                .migrationsCopy(this.migrations);
+    }
+
+    public Builder toBuilder() {
+        return fork();
     }
 
     public ConfigFormat format() {
@@ -165,7 +193,12 @@ public final class ConfigManager {
             if (!probeDiag.hasErrors()) {
                 doc = ConfigDocument.fromNode(existingNode);
                 ConfigNode.MapNode encoded = binder.encodeDocumentNode(instance);
-                mergeGeneratedIntoDocument(encoded, doc, "");
+                Set<String> extraRootKeep = new LinkedHashSet<>();
+                VersionManager.VersionDescriptor ver = VersionManager.inspect(instance.getClass(), options.naming());
+                if (ver != null && ver.expectedVersion() >= 0) {
+                    extraRootKeep.add(ver.key());
+                }
+                mergeGeneratedIntoDocument(encoded, doc, "", extraRootKeep);
                 binder.syncCommentsAndDefaults(instance, doc);
             } else {
                 doc = ConfigDocument.fromNode(binder.encodeDocumentNode(instance));
@@ -248,14 +281,14 @@ public final class ConfigManager {
         return new LoadOutcome<>(true, bound, diagnostics);
     }
 
-    private void ensureVersionKey(ConfigDocument doc, Class<?> type) {
+    void ensureVersionKey(ConfigDocument doc, Class<?> type) {
         VersionManager.VersionDescriptor ver = VersionManager.inspect(type, options.naming());
         if (ver != null && ver.expectedVersion() >= 0 && !doc.has(ver.key())) {
             doc.setRaw(ver.key(), ver.expectedVersion());
         }
     }
 
-    private void writeDocumentAtomically(ConfigNode.MapNode root, Path file) throws IOException {
+    void writeDocumentAtomically(ConfigNode.MapNode root, Path file) throws IOException {
         Path abs = file.toAbsolutePath().normalize();
         Path parent = abs.getParent();
         if (parent != null) {
@@ -279,24 +312,38 @@ public final class ConfigManager {
         }
     }
 
-    private static void mergeGeneratedIntoDocument(ConfigNode.MapNode encoded, ConfigDocument doc, String prefix) {
+    @Nullable MigrationChain migrationFor(Class<?> type) {
+        return migrations.get(type);
+    }
+
+    private static void mergeGeneratedIntoDocument(
+            ConfigNode.MapNode encoded,
+            ConfigDocument doc,
+            String prefix,
+            Set<String> extraRootKeep
+    ) {
         if (prefix.isEmpty() && !encoded.comments().block().isEmpty() && doc.headerComments().block().isEmpty()) {
             doc.setHeader(encoded.comments().block());
         }
+        Set<String> keepKeys = new LinkedHashSet<>(encoded.entries().keySet());
+        if (prefix.isEmpty() && !extraRootKeep.isEmpty()) {
+            keepKeys.addAll(extraRootKeep);
+        }
+        doc.pruneMissingChildren(prefix, keepKeys);
         for (ConfigNode.MapEntry entry : encoded.entries().values()) {
-            String path = prefix.isEmpty() ? entry.key() : prefix + "." + entry.key();
+            String path = ConfigDocument.joinPath(prefix, entry.key());
             if (entry.value() instanceof ConfigNode.MapNode nested && !nested.isEmpty()) {
-                mergeGeneratedIntoDocument(nested, doc, path);
+                mergeGeneratedIntoDocument(nested, doc, path, Set.of());
             } else {
                 doc.set(path, entry.value());
             }
             if (!entry.keyComments().block().isEmpty()) {
-                doc.setBlockComments(path, entry.keyComments().block());
+                doc.setBlockCommentsIfAbsent(path, entry.keyComments().block());
             }
             if (!entry.keyComments().inline().isEmpty()) {
-                doc.setInlineComments(path, entry.keyComments().inline());
+                doc.setInlineCommentsIfAbsent(path, entry.keyComments().inline());
             } else if (!entry.value().comments().inline().isEmpty()) {
-                doc.setInlineComments(path, entry.value().comments().inline());
+                doc.setInlineCommentsIfAbsent(path, entry.value().comments().inline());
             }
         }
     }
@@ -329,7 +376,7 @@ public final class ConfigManager {
 
     public static final class Builder {
         private ConfigFormat format;
-        private final CodecRegistry codecs = CodecRegistry.defaults();
+        private CodecRegistry codecs = CodecRegistry.defaults();
         private NamingStrategy naming = NamingStrategy.KEBAB_CASE;
         private UnknownKeyPolicy unknownKeyPolicy = UnknownKeyPolicy.WARN;
         private SyncMode syncMode = SyncMode.PATCH_MISSING;
@@ -340,6 +387,16 @@ public final class ConfigManager {
         private final Map<Class<?>, MigrationChain> migrations = new ConcurrentHashMap<>();
 
         private Builder() {
+        }
+
+        private Builder codecsCopy(CodecRegistry copy) {
+            this.codecs = copy;
+            return this;
+        }
+
+        private Builder migrationsCopy(Map<Class<?>, MigrationChain> existing) {
+            this.migrations.putAll(existing);
+            return this;
         }
 
         public Builder format(ConfigFormat format) {

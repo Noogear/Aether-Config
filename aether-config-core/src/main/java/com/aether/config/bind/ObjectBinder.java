@@ -2,6 +2,7 @@ package com.aether.config.bind;
 
 import com.aether.config.annotation.Check;
 import com.aether.config.annotation.Header;
+import com.aether.config.annotation.Polymorphic;
 import com.aether.config.annotation.PostLoad;
 import com.aether.config.annotation.PreLoad;
 import com.aether.config.annotation.Range;
@@ -42,7 +43,12 @@ import java.util.regex.Pattern;
  */
 public final class ObjectBinder {
 
-    private static final Map<Class<?>, Check.ConfigValidator<?>> VALIDATOR_CACHE = new ConcurrentHashMap<>();
+    private static final ClassValue<Check.ConfigValidator<?>> VALIDATOR_CACHE = new ClassValue<>() {
+        @Override
+        protected Check.ConfigValidator<?> computeValue(Class<?> type) {
+            return (Check.ConfigValidator<?>) instantiateNoArg(type);
+        }
+    };
     private static final Map<String, Pattern> REGEX_CACHE = new ConcurrentHashMap<>();
 
     private final CodecRegistry baseCodecs;
@@ -76,8 +82,22 @@ public final class ObjectBinder {
             @Nullable ConfigDocument patchDoc,
             @Nullable Object hookContext
     ) {
+        return bindInternal(type, section, patchDoc, hookContext, Set.of());
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> T bindInternal(
+            Class<T> type,
+            ConfigSection section,
+            @Nullable ConfigDocument patchDoc,
+            @Nullable Object hookContext,
+            Set<String> extraAllowedKeys
+    ) {
+        if (isPolymorphicBase(type)) {
+            return bindPolymorphic(type, section, patchDoc, hookContext);
+        }
         List<PropertySchema> props = PropertySchema.forType(type);
-        handleUnknownKeys(type, props, section, patchDoc);
+        handleUnknownKeys(type, props, section, patchDoc, extraAllowedKeys);
         if (patchDoc != null && section.basePath().isEmpty()) {
             applyHeaderIfAbsent(type, patchDoc);
         }
@@ -89,7 +109,6 @@ public final class ObjectBinder {
                 args[i] = bindProperty(props.get(i), null, section, patchDoc, hookContext);
             }
             try {
-                @SuppressWarnings("unchecked")
                 T created = (T) PropertySchema.recordCanonicalConstructor(type).newInstance(args);
                 instance = created;
             } catch (Exception e) {
@@ -108,6 +127,39 @@ public final class ObjectBinder {
         return instance;
     }
 
+    @SuppressWarnings("unchecked")
+    private <T> @Nullable T bindPolymorphic(
+            Class<T> baseType,
+            ConfigSection section,
+            @Nullable ConfigDocument patchDoc,
+            @Nullable Object hookContext
+    ) {
+        String typeKey = resolvePolymorphicTypeKey(baseType);
+        ConfigNode.MapEntry typeEntry = section.node().entry(typeKey);
+        if (typeEntry == null || typeEntry.value() instanceof ConfigNode.NullNode) {
+            section.diagnostics().error(
+                    DiagnosticCategory.SCHEMA,
+                    section.span(),
+                    section.exactPath(typeKey),
+                    "Missing polymorphic type discriminator '" + typeKey + "' for " + baseType.getSimpleName() + "."
+            );
+            return null;
+        }
+        Object rawName = typeEntry.value().rawValue();
+        String typeName = rawName != null ? String.valueOf(rawName).trim() : "";
+        Class<?> subType = resolvePolymorphicSubType(baseType, typeName);
+        if (subType == null || !baseType.isAssignableFrom(subType)) {
+            section.diagnostics().error(
+                    DiagnosticCategory.TYPE,
+                    typeEntry.value().span(),
+                    section.exactPath(typeKey),
+                    "Unknown polymorphic subtype '" + typeName + "' for " + baseType.getSimpleName() + "."
+            );
+            return null;
+        }
+        return (T) bindInternal(subType, section, patchDoc, hookContext, Set.of(typeKey));
+    }
+
     public <T> ConfigNode.MapNode encodeDocumentNode(T instance) {
         ConfigDocument doc = ConfigDocument.empty("<generated>");
         encodeIntoDocument(instance, doc, "");
@@ -122,12 +174,12 @@ public final class ObjectBinder {
     private void syncMetaComments(Class<?> type, ConfigDocument doc, String prefix) {
         for (PropertySchema prop : PropertySchema.forType(type)) {
             String key = prop.resolveKey(options.naming());
-            String path = prefix.isEmpty() ? key : prefix + "." + key;
+            String path = ConfigDocument.joinPath(prefix, key);
             if (!doc.has(path)) {
                 continue;
             }
             attachCommentsIfAbsent(prop, path, doc);
-            if (isNestedBindable(prop.rawType())) {
+            if (isNestedBindable(prop.rawType()) && !isPolymorphicBase(prop.rawType())) {
                 syncMetaComments(prop.rawType(), doc, path);
             }
         }
@@ -137,15 +189,21 @@ public final class ObjectBinder {
         if (prefix.isEmpty()) {
             applyHeaderIfAbsent(instance.getClass(), doc);
         }
+        Class<?> polyBase = findPolymorphicBase(instance.getClass());
+        if (polyBase != null) {
+            String typeKey = resolvePolymorphicTypeKey(polyBase);
+            String typeName = resolvePolymorphicTypeName(polyBase, instance.getClass());
+            doc.set(ConfigDocument.joinPath(prefix, typeKey), ConfigNode.ScalarNode.of(typeName));
+        }
         CodecContext ctx = new CodecContext(codecs);
         for (PropertySchema prop : PropertySchema.forType(instance.getClass())) {
             String key = prop.resolveKey(options.naming());
-            String path = prefix.isEmpty() ? key : prefix + "." + key;
+            String path = ConfigDocument.joinPath(prefix, key);
             Object val = prop.get(instance);
             if (val == null) {
                 continue;
             }
-            if (isNestedBindable(prop.rawType())) {
+            if (isNestedBindable(prop.rawType()) || isPolymorphicBase(prop.rawType())) {
                 encodeIntoDocument(val, doc, path);
                 if (!doc.has(path)) {
                     doc.set(path, ConfigNode.MapNode.EMPTY);
@@ -154,10 +212,10 @@ public final class ObjectBinder {
                 doc.set(path, ctx.encode(val, prop.genericType()));
             }
             if (prop.comment() != null) {
-                doc.setBlockComments(path, List.of(prop.comment().value()));
+                doc.setBlockCommentsIfAbsent(path, List.of(prop.comment().value()));
             }
             if (prop.inline() != null) {
-                doc.setInlineComments(path, List.of(prop.inline().value()));
+                doc.setInlineCommentsIfAbsent(path, List.of(prop.inline().value()));
             }
         }
     }
@@ -177,7 +235,7 @@ public final class ObjectBinder {
             @Nullable Object hookContext
     ) {
         String primaryKey = prop.resolveKey(options.naming());
-        String fullPath = section.fullPath(primaryKey);
+        String fullPath = section.exactPath(primaryKey);
         ConfigNode.MapEntry matched = section.node().entry(primaryKey);
 
         Class<?> rawType = prop.rawType();
@@ -191,9 +249,9 @@ public final class ObjectBinder {
 
         Object result;
         if (isNestedBindable(rawType)) {
-            result = bind(rawType, section.section(primaryKey), patchDoc, hookContext);
+            result = bind(rawType, section.exactSection(primaryKey), patchDoc, hookContext);
         } else if (rawType == ConfigSection.class) {
-            result = section.section(primaryKey);
+            result = section.exactSection(primaryKey);
         } else {
             ConfigValue val = new ConfigValue(section.source(), fullPath, matched.value(), section.diagnostics(), codecs);
             result = decodeWithRegistry(prop, val, pojoDefault);
@@ -215,7 +273,7 @@ public final class ObjectBinder {
             @Nullable Object hookContext
     ) {
         String key = prop.resolveKey(options.naming());
-        String fullPath = section.fullPath(key);
+        String fullPath = section.exactPath(key);
 
         if (prop.defaultValue() != null) {
             ConfigValue synthetic = new ConfigValue(
@@ -229,7 +287,14 @@ public final class ObjectBinder {
         Class<?> rawType = prop.rawType();
         if (pojoDefault != null) {
             if (isNestedBindable(rawType)) {
-                return bind(rawType, ConfigSection.empty(section.source(), fullPath, section.diagnostics(), codecs), patchDoc, hookContext);
+                runHooks(pojoDefault, PostLoad.class, hookContext, section.diagnostics(), section.span());
+                return pojoDefault;
+            }
+            if (List.class.isAssignableFrom(rawType)) {
+                return List.copyOf((Collection<?>) pojoDefault);
+            }
+            if (Set.class.isAssignableFrom(rawType)) {
+                return Collections.unmodifiableSet(new LinkedHashSet<>((Collection<?>) pojoDefault));
             }
             if (Map.class.isAssignableFrom(rawType)) {
                 return Collections.unmodifiableMap(new LinkedHashMap<>((Map<String, Object>) pojoDefault));
@@ -310,10 +375,7 @@ public final class ObjectBinder {
         }
         if (prop.check() != null) {
             try {
-                Check.ConfigValidator validator = VALIDATOR_CACHE.computeIfAbsent(
-                        prop.check().value(),
-                        cls -> (Check.ConfigValidator<?>) instantiateNoArg(cls)
-                );
+                Check.ConfigValidator validator = VALIDATOR_CACHE.get(prop.check().value());
                 current = validator.validate(current);
             } catch (ConfigDecodeException ex) {
                 diagnostics.error(DiagnosticCategory.VALIDATION, span, path, ex.getMessage());
@@ -364,10 +426,15 @@ public final class ObjectBinder {
         if (value == null) {
             return;
         }
-        if (!isNestedBindable(prop.rawType())) {
+        if (isPolymorphicBase(prop.rawType())) {
+            encodeIntoDocument(value, patchDoc, fullPath);
+        } else if (!isNestedBindable(prop.rawType())) {
             patchDoc.set(fullPath, new CodecContext(codecs).encode(value, prop.genericType()));
-        } else if (!patchDoc.has(fullPath)) {
-            patchDoc.set(fullPath, ConfigNode.MapNode.EMPTY);
+        } else {
+            encodeIntoDocument(value, patchDoc, fullPath);
+            if (!patchDoc.has(fullPath)) {
+                patchDoc.set(fullPath, ConfigNode.MapNode.EMPTY);
+            }
         }
         attachCommentsIfAbsent(prop, fullPath, patchDoc);
     }
@@ -392,12 +459,14 @@ public final class ObjectBinder {
             Class<?> ownerType,
             List<PropertySchema> props,
             ConfigSection section,
-            @Nullable ConfigDocument patchDoc
+            @Nullable ConfigDocument patchDoc,
+            Set<String> extraAllowedKeys
     ) {
         if (options.unknownKeyPolicy() == UnknownKeyPolicy.IGNORE || section.isEmpty()) {
             return;
         }
-        Set<String> allowed = new LinkedHashSet<>(props.size() + 1);
+        Set<String> allowed = new LinkedHashSet<>(props.size() + extraAllowedKeys.size() + 1);
+        allowed.addAll(extraAllowedKeys);
         if (section.basePath().isEmpty()) {
             Version typeVersion = ownerType.getAnnotation(Version.class);
             if (typeVersion != null && !typeVersion.key().isEmpty()) {
@@ -415,7 +484,7 @@ public final class ObjectBinder {
             String suggestion = SpellingSuggester.suggest(key, allowed);
             String hint = suggestion != null ? "Did you mean '" + suggestion + "'?" : null;
             SourceSpan span = entry.keySpan().isKnown() ? entry.keySpan() : entry.value().span();
-            String path = section.fullPath(key);
+            String path = section.exactPath(key);
 
             switch (options.unknownKeyPolicy()) {
                 case ERROR -> section.diagnostics().error(DiagnosticCategory.SCHEMA, span, path,
@@ -439,6 +508,74 @@ public final class ObjectBinder {
         return !baseCodecs.hasExplicit(rawType) && isBindableObjectType(rawType);
     }
 
+    private static boolean isPolymorphicBase(Class<?> raw) {
+        return raw != null && (raw.isAnnotationPresent(Polymorphic.class) || raw.isSealed());
+    }
+
+    private static @Nullable Class<?> findPolymorphicBase(Class<?> concreteType) {
+        if (concreteType == null) {
+            return null;
+        }
+        if (isPolymorphicBase(concreteType)) {
+            return concreteType;
+        }
+        for (Class<?> sup = concreteType.getSuperclass(); sup != null && sup != Object.class; sup = sup.getSuperclass()) {
+            if (isPolymorphicBase(sup)) {
+                return sup;
+            }
+        }
+        for (Class<?> iface : concreteType.getInterfaces()) {
+            if (isPolymorphicBase(iface)) {
+                return iface;
+            }
+        }
+        return null;
+    }
+
+    private static String resolvePolymorphicTypeKey(Class<?> baseType) {
+        Polymorphic poly = baseType.getAnnotation(Polymorphic.class);
+        return poly != null && !poly.typeKey().isEmpty() ? poly.typeKey() : "type";
+    }
+
+    private static @Nullable Class<?> resolvePolymorphicSubType(Class<?> baseType, String rawName) {
+        if (rawName.isEmpty()) {
+            return null;
+        }
+        String normalized = rawName.trim().replace('_', '-');
+        Polymorphic poly = baseType.getAnnotation(Polymorphic.class);
+        if (poly != null) {
+            for (Polymorphic.SubType sub : poly.value()) {
+                if (sub.name().equalsIgnoreCase(rawName.trim())
+                        || sub.name().replace('_', '-').equalsIgnoreCase(normalized)) {
+                    return sub.type();
+                }
+            }
+        }
+        Class<?>[] permitted = baseType.getPermittedSubclasses();
+        if (permitted != null) {
+            for (Class<?> sub : permitted) {
+                String simple = sub.getSimpleName();
+                String kebab = NamingStrategy.KEBAB_CASE.format(simple);
+                if (simple.equalsIgnoreCase(rawName.trim()) || kebab.equalsIgnoreCase(normalized)) {
+                    return sub;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String resolvePolymorphicTypeName(Class<?> baseType, Class<?> concreteType) {
+        Polymorphic poly = baseType.getAnnotation(Polymorphic.class);
+        if (poly != null) {
+            for (Polymorphic.SubType sub : poly.value()) {
+                if (sub.type() == concreteType) {
+                    return sub.name();
+                }
+            }
+        }
+        return NamingStrategy.KEBAB_CASE.format(concreteType.getSimpleName());
+    }
+
     private static boolean isBindableObjectType(Class<?> raw) {
         if (raw == null || raw == Object.class || raw.isPrimitive() || raw.isEnum() || raw.isArray()
                 || Collection.class.isAssignableFrom(raw) || Map.class.isAssignableFrom(raw)
@@ -447,6 +584,9 @@ public final class ObjectBinder {
         }
         if (raw.getPackageName().startsWith("java.") || raw.getPackageName().startsWith("javax.")) {
             return false;
+        }
+        if (isPolymorphicBase(raw)) {
+            return true;
         }
         if (raw.isRecord()) {
             return true;

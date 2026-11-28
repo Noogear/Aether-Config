@@ -25,16 +25,35 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Cached reflection metadata abstracting over Java {@code record} components and POJO fields.
+ * Uses {@link ClassValue} so unloaded addon classloaders can be garbage-collected cleanly.
  */
 public final class PropertySchema {
 
-    private static final Map<Class<?>, List<PropertySchema>> SCHEMA_CACHE = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, Constructor<?>> RECORD_CTOR_CACHE = new ConcurrentHashMap<>();
+    private static final ClassValue<List<PropertySchema>> SCHEMA_CACHE = new ClassValue<>() {
+        @Override
+        protected List<PropertySchema> computeValue(Class<?> type) {
+            return introspect(type);
+        }
+    };
+
+    private static final ClassValue<Constructor<?>> RECORD_CTOR_CACHE = new ClassValue<>() {
+        @Override
+        protected Constructor<?> computeValue(Class<?> recordClass) {
+            Class<?>[] paramTypes = Arrays.stream(recordClass.getRecordComponents())
+                    .map(RecordComponent::getType)
+                    .toArray(Class<?>[]::new);
+            try {
+                Constructor<?> ctor = recordClass.getDeclaredConstructor(paramTypes);
+                ctor.setAccessible(true);
+                return ctor;
+            } catch (NoSuchMethodException e) {
+                throw new IllegalStateException("Missing canonical constructor on record " + recordClass.getName(), e);
+            }
+        }
+    };
 
     private final String javaName;
     private final Class<?> rawType;
@@ -84,22 +103,11 @@ public final class PropertySchema {
     }
 
     public static List<PropertySchema> forType(Class<?> type) {
-        return SCHEMA_CACHE.computeIfAbsent(type, PropertySchema::introspect);
+        return SCHEMA_CACHE.get(type);
     }
 
     public static Constructor<?> recordCanonicalConstructor(Class<?> recordClass) {
-        return RECORD_CTOR_CACHE.computeIfAbsent(recordClass, cls -> {
-            Class<?>[] paramTypes = Arrays.stream(cls.getRecordComponents())
-                    .map(RecordComponent::getType)
-                    .toArray(Class<?>[]::new);
-            try {
-                Constructor<?> ctor = cls.getDeclaredConstructor(paramTypes);
-                ctor.setAccessible(true);
-                return ctor;
-            } catch (NoSuchMethodException e) {
-                throw new IllegalStateException("Missing canonical constructor on record " + cls.getName(), e);
-            }
-        });
+        return RECORD_CTOR_CACHE.get(recordClass);
     }
 
     private static List<PropertySchema> introspect(Class<?> type) {

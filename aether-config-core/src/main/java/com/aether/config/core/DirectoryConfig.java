@@ -2,9 +2,11 @@ package com.aether.config.core;
 
 import com.aether.config.annotation.DefaultResources;
 import com.aether.config.bind.ObjectBinder;
+import com.aether.config.bind.SyncMode;
 import com.aether.config.diagnostic.ConfigDiagnostics;
 import com.aether.config.diagnostic.ConfigException;
 import com.aether.config.diagnostic.DiagnosticCategory;
+import com.aether.config.migration.VersionManager;
 import com.aether.config.node.ConfigDocument;
 import com.aether.config.node.ConfigNode;
 import com.aether.config.node.SourceSpan;
@@ -20,7 +22,12 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 
 /**
  * Directory-backed configuration loading all matching files into a merged {@code Map<String, V>}
@@ -51,6 +58,10 @@ public final class DirectoryConfig<V> {
     private final @Nullable Class<V> valueType;
     private final @Nullable EntryFactory<V> entryFactory;
     private final boolean recursive;
+    private final boolean fileAsEntry;
+    private final boolean keyFromRelativePath;
+    private final boolean preserveSubdirectories;
+    private final @Nullable String resourcePrefix;
     private final @Nullable String rootKey;
     private final @Nullable ResourceProvider resourceProvider;
     private final @Nullable String[] defaultResourcePaths;
@@ -60,8 +71,11 @@ public final class DirectoryConfig<V> {
 
     private final FileCache fileCache = new FileCache();
     private final Map<String, Map<String, V>> perFileEntries = new LinkedHashMap<>();
+    private final Map<String, Path> perRelPathFile = new LinkedHashMap<>();
+    private final AtomicReference<Map<String, Path>> entryFiles = new AtomicReference<>(Collections.emptyMap());
     private final AtomicReference<Map<String, V>> mergedEntries = new AtomicReference<>(Collections.emptyMap());
     private final AtomicReference<ConfigDiagnostics> lastDiagnostics = new AtomicReference<>(new ConfigDiagnostics());
+    private final CopyOnWriteArrayList<BiConsumer<Map<String, V>, Map<String, V>>> reloadListeners = new CopyOnWriteArrayList<>();
     private final Object lock = new Object();
 
     private DirectoryConfig(Builder<V> builder) {
@@ -70,6 +84,10 @@ public final class DirectoryConfig<V> {
         this.valueType = builder.valueType;
         this.entryFactory = builder.entryFactory;
         this.recursive = builder.recursive;
+        this.fileAsEntry = builder.fileAsEntry;
+        this.keyFromRelativePath = builder.keyFromRelativePath;
+        this.preserveSubdirectories = builder.preserveSubdirectories;
+        this.resourcePrefix = builder.resourcePrefix;
         this.rootKey = builder.rootKey;
         this.resourceProvider = builder.resourceProvider;
         this.defaultResourcePaths = builder.defaultResourcePaths;
@@ -86,6 +104,15 @@ public final class DirectoryConfig<V> {
         return key != null ? mergedEntries.get().get(key) : null;
     }
 
+    public @Nullable Path sourceFile(@Nullable String key) {
+        return key != null ? entryFiles.get().get(key) : null;
+    }
+
+    public DirectoryConfig<V> onReload(BiConsumer<Map<String, V>, Map<String, V>> listener) {
+        reloadListeners.add(listener);
+        return this;
+    }
+
     public ConfigDiagnostics diagnostics() {
         return lastDiagnostics.get();
     }
@@ -95,11 +122,62 @@ public final class DirectoryConfig<V> {
     }
 
     public ReloadResult<Map<String, V>> reload() {
+        ReloadResult<Map<String, V>> result;
+        Map<String, V> previous;
         synchronized (lock) {
+            previous = mergedEntries.get();
             if (!perFileEntries.isEmpty() && isFresh()) {
-                return new ReloadResult<>(true, false, mergedEntries.get(), new ConfigDiagnostics());
+                return new ReloadResult<>(true, false, previous, new ConfigDiagnostics());
             }
-            return executeLoad(false);
+            result = executeLoad(false);
+        }
+        if (result.changed()) {
+            notifyReloadListeners(previous, result.value(), result.diagnostics());
+        }
+        return result;
+    }
+
+    public CompletableFuture<ReloadResult<Map<String, V>>> reloadAsync() {
+        return reloadAsync(ForkJoinPool.commonPool());
+    }
+
+    public CompletableFuture<ReloadResult<Map<String, V>>> reloadAsync(Executor executor) {
+        return CompletableFuture.supplyAsync(this::reload, executor);
+    }
+
+    public void saveEntry(String id, V value) throws IOException {
+        Map<String, V> previous;
+        Map<String, V> next;
+        ConfigDiagnostics diag = new ConfigDiagnostics();
+        synchronized (lock) {
+            previous = mergedEntries.get();
+            Path target = entryFiles.get().get(id);
+            if (target == null) {
+                if (!fileAsEntry) {
+                    throw new IOException("Cannot infer target file for entry '" + id + "' when fileAsEntry is disabled");
+                }
+                String ext = manager.format().extensions().stream().findFirst().orElse(".yml");
+                if (!ext.startsWith(".")) {
+                    ext = "." + ext;
+                }
+                target = directory.resolve(id + ext).toAbsolutePath().normalize();
+            }
+            manager.saveObject(value, target);
+            ReloadResult<Map<String, V>> reloaded = executeLoad(false);
+            next = reloaded.value();
+            diag = reloaded.diagnostics();
+        }
+        notifyReloadListeners(previous, next, diag);
+    }
+
+    private void notifyReloadListeners(Map<String, V> previous, Map<String, V> next, ConfigDiagnostics diag) {
+        for (BiConsumer<Map<String, V>, Map<String, V>> listener : reloadListeners) {
+            try {
+                listener.accept(previous, next);
+            } catch (Exception ex) {
+                diag.warn(DiagnosticCategory.IO, SourceSpan.ofSource(directory.toString()), "",
+                        "Directory reload listener threw an exception: " + ex.getMessage());
+            }
         }
     }
 
@@ -127,10 +205,12 @@ public final class DirectoryConfig<V> {
 
         boolean anyChanged = initial || files.size() != perFileEntries.size();
         Map<String, Map<String, V>> nextPerFile = new LinkedHashMap<>();
+        Map<String, Path> nextRelToFile = new LinkedHashMap<>();
         ObjectBinder binder = manager.binder();
 
         for (Path file : files) {
             String rel = directory.relativize(file).toString().replace('\\', '/');
+            nextRelToFile.put(rel, file);
             boolean fresh = !initial && fileCache.isFresh(file) && perFileEntries.containsKey(rel);
             if (fresh) {
                 nextPerFile.put(rel, perFileEntries.get(rel));
@@ -149,9 +229,11 @@ public final class DirectoryConfig<V> {
         }
 
         Map<String, V> merged = new LinkedHashMap<>();
+        Map<String, Path> mergedFiles = new LinkedHashMap<>();
         Map<String, String> keyOrigin = new LinkedHashMap<>();
         for (Map.Entry<String, Map<String, V>> fileEntry : nextPerFile.entrySet()) {
             String sourceRel = fileEntry.getKey();
+            Path sourcePath = nextRelToFile.get(sourceRel);
             for (Map.Entry<String, V> item : fileEntry.getValue().entrySet()) {
                 String id = item.getKey();
                 if (merged.containsKey(id)) {
@@ -171,6 +253,9 @@ public final class DirectoryConfig<V> {
                     }
                 }
                 merged.put(id, item.getValue());
+                if (sourcePath != null) {
+                    mergedFiles.put(id, sourcePath);
+                }
                 keyOrigin.put(id, sourceRel);
             }
         }
@@ -185,6 +270,9 @@ public final class DirectoryConfig<V> {
 
         perFileEntries.clear();
         perFileEntries.putAll(nextPerFile);
+        perRelPathFile.clear();
+        perRelPathFile.putAll(nextRelToFile);
+        entryFiles.set(Collections.unmodifiableMap(mergedFiles));
         Map<String, V> immutableMerged = Collections.unmodifiableMap(merged);
         mergedEntries.set(immutableMerged);
         lastDiagnostics.set(diag);
@@ -208,6 +296,52 @@ public final class DirectoryConfig<V> {
         }
 
         ConfigNode.MapNode parsed = manager.format().parse(relPath, new StringReader(content), diag);
+
+        if (fileAsEntry) {
+            ConfigDocument doc = ConfigDocument.fromNode(parsed);
+            boolean migrated = false;
+            if (valueType != null) {
+                migrated = VersionManager.migrateIfNeeded(
+                        valueType, file, false, doc, manager.options().naming(), manager.migrationFor(valueType), diag
+                );
+            }
+            ConfigNode.MapNode interpolated = manager.interpolator().interpolate(doc.toNode(), diag);
+            ConfigSection fileRoot = ConfigSection.ofNode(relPath, "", interpolated, diag, binder.codecs());
+            ConfigSection scope = fileRoot;
+            if (rootKey != null && !rootKey.isEmpty()) {
+                if (!fileRoot.has(rootKey)) {
+                    return Map.of();
+                }
+                scope = fileRoot.section(rootKey);
+            }
+            String entryId = deriveFileId(relPath);
+            boolean allowPatch = manager.options().syncMode() == SyncMode.PATCH_MISSING
+                    && (rootKey == null || rootKey.isEmpty());
+            ConfigDocument patchTarget = allowPatch ? doc : null;
+            try {
+                V value;
+                if (entryFactory != null) {
+                    value = entryFactory.create(entryId, scope);
+                } else if (valueType != null) {
+                    value = binder.bind(valueType, scope, patchTarget, hookContext);
+                } else {
+                    value = null;
+                }
+                if (patchTarget != null && valueType != null && (migrated || patchTarget.isModified()) && !diag.hasErrors()) {
+                    manager.ensureVersionKey(patchTarget, valueType);
+                    manager.writeDocumentAtomically(patchTarget.toNode(), file);
+                }
+                if (value == null) {
+                    return Map.of();
+                }
+                return Map.of(entryId, value);
+            } catch (Exception ex) {
+                diag.error(DiagnosticCategory.TYPE, scope.span(), entryId,
+                        "Failed to load entry '" + entryId + "': " + ex.getMessage());
+                return Map.of();
+            }
+        }
+
         ConfigNode.MapNode interpolated = manager.interpolator().interpolate(parsed, diag);
         ConfigSection fileRoot = ConfigSection.ofNode(relPath, "", interpolated, diag, binder.codecs());
 
@@ -245,6 +379,19 @@ public final class DirectoryConfig<V> {
         return entries;
     }
 
+    private String deriveFileId(String relPath) {
+        String base = relPath;
+        if (!keyFromRelativePath) {
+            int slash = base.lastIndexOf('/');
+            if (slash >= 0) {
+                base = base.substring(slash + 1);
+            }
+        }
+        int dot = base.lastIndexOf('.');
+        int lastSlash = base.lastIndexOf('/');
+        return dot > lastSlash ? base.substring(0, dot) : base;
+    }
+
     private void seedDefaults(ConfigDiagnostics diag) {
         String[] paths = defaultResourcePaths;
         if (paths == null && valueType != null) {
@@ -258,7 +405,26 @@ public final class DirectoryConfig<V> {
         }
         for (String resPath : paths) {
             String normalized = resPath.replace('\\', '/');
-            String relTarget = normalized.contains("/") ? normalized.substring(normalized.lastIndexOf('/') + 1) : normalized;
+            if (normalized.startsWith("/")) {
+                normalized = normalized.substring(1);
+            }
+            String relTarget;
+            if (resourcePrefix != null && !resourcePrefix.isEmpty()) {
+                String cleanPrefix = resourcePrefix.replace('\\', '/');
+                if (cleanPrefix.startsWith("/")) {
+                    cleanPrefix = cleanPrefix.substring(1);
+                }
+                if (!cleanPrefix.endsWith("/")) {
+                    cleanPrefix = cleanPrefix + "/";
+                }
+                relTarget = normalized.startsWith(cleanPrefix)
+                        ? normalized.substring(cleanPrefix.length())
+                        : (normalized.contains("/") ? normalized.substring(normalized.lastIndexOf('/') + 1) : normalized);
+            } else if (preserveSubdirectories) {
+                relTarget = normalized;
+            } else {
+                relTarget = normalized.contains("/") ? normalized.substring(normalized.lastIndexOf('/') + 1) : normalized;
+            }
             Path dest = directory.resolve(relTarget);
             if (Files.exists(dest)) {
                 continue;
@@ -287,6 +453,10 @@ public final class DirectoryConfig<V> {
         private @Nullable Class<V> valueType;
         private @Nullable EntryFactory<V> entryFactory;
         private boolean recursive = false;
+        private boolean fileAsEntry = false;
+        private boolean keyFromRelativePath = false;
+        private boolean preserveSubdirectories = false;
+        private @Nullable String resourcePrefix;
         private @Nullable String rootKey;
         private @Nullable ResourceProvider resourceProvider;
         private @Nullable String[] defaultResourcePaths;
@@ -317,6 +487,27 @@ public final class DirectoryConfig<V> {
 
         public Builder<V> recursive() {
             this.recursive = true;
+            return this;
+        }
+
+        public Builder<V> fileAsEntry() {
+            this.fileAsEntry = true;
+            return this;
+        }
+
+        public Builder<V> fileAsEntry(boolean keyFromRelativePath) {
+            this.fileAsEntry = true;
+            this.keyFromRelativePath = keyFromRelativePath;
+            return this;
+        }
+
+        public Builder<V> preserveSubdirectories(boolean preserveSubdirectories) {
+            this.preserveSubdirectories = preserveSubdirectories;
+            return this;
+        }
+
+        public Builder<V> resourcePrefix(@Nullable String resourcePrefix) {
+            this.resourcePrefix = resourcePrefix;
             return this;
         }
 

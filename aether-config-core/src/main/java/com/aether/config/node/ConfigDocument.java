@@ -7,6 +7,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Mutable comment-preserving AST document used for migration, incremental patching, and default generation.
@@ -181,6 +182,35 @@ public final class ConfigDocument {
         return false;
     }
 
+    public boolean pruneMissingChildren(String prefixDotPath, Set<String> keepKeys) {
+        Map<String, MutableEntry> targetMap;
+        if (prefixDotPath == null || prefixDotPath.isEmpty()) {
+            targetMap = rootEntries;
+        } else {
+            MutableEntry entry = getEntry(prefixDotPath);
+            if (entry == null || entry.children == null) {
+                return false;
+            }
+            targetMap = entry.children;
+        }
+        boolean removed = targetMap.keySet().removeIf(k -> !keepKeys.contains(k));
+        if (removed) {
+            modified = true;
+        }
+        return removed;
+    }
+
+    public static String escapeKey(String key) {
+        return key.indexOf('.') >= 0 || key.indexOf('\\') >= 0
+                ? key.replace("\\", "\\\\").replace(".", "\\.")
+                : key;
+    }
+
+    public static String joinPath(String prefix, String key) {
+        String escaped = escapeKey(key);
+        return prefix == null || prefix.isEmpty() ? escaped : prefix + "." + escaped;
+    }
+
     public boolean rename(String oldPath, String newPath) {
         MutableEntry oldEntry = getEntry(oldPath);
         if (oldEntry == null) {
@@ -290,8 +320,8 @@ public final class ConfigDocument {
         StringBuilder current = new StringBuilder();
         for (int i = 0; i < path.length(); i++) {
             char c = path.charAt(i);
-            if (c == '\\' && i + 1 < path.length() && path.charAt(i + 1) == '.') {
-                current.append('.');
+            if (c == '\\' && i + 1 < path.length() && (path.charAt(i + 1) == '.' || path.charAt(i + 1) == '\\')) {
+                current.append(path.charAt(i + 1));
                 i++;
             } else if (c == '.') {
                 parts.add(current.toString());

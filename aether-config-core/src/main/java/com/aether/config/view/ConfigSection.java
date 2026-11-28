@@ -151,6 +151,24 @@ public final class ConfigSection {
         return basePath + "." + relativePath;
     }
 
+    public String exactPath(String exactKey) {
+        return ConfigDocument.joinPath(basePath, exactKey);
+    }
+
+    public ConfigSection exactSection(String exactKey) {
+        ConfigNode raw = node.child(exactKey);
+        String resolvedPath = exactPath(exactKey);
+        if (raw == null || raw instanceof ConfigNode.NullNode) {
+            return empty(source, resolvedPath, diagnostics, codecs);
+        }
+        if (raw instanceof ConfigNode.MapNode mapNode) {
+            return ofNode(source, resolvedPath, mapNode, diagnostics, codecs);
+        }
+        diagnostics.warn(DiagnosticCategory.TYPE, raw.span(), resolvedPath,
+                "Expected mapping section, got " + raw.getClass().getSimpleName() + ".");
+        return empty(source, resolvedPath, diagnostics, codecs);
+    }
+
     public ConfigSection section(String path) {
         ConfigNode raw = resolveNode(path);
         String resolvedPath = fullPath(path);

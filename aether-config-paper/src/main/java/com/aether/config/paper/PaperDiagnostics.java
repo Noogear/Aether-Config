@@ -31,6 +31,10 @@ public final class PaperDiagnostics {
         }
     }
 
+    public static String format(ConfigDiagnostics diagnostics) {
+        return diagnostics.formatAll();
+    }
+
     public static void send(ConfigDiagnostics diagnostics, CommandSender sender) {
         for (DiagnosticEntry entry : diagnostics.entries()) {
             NamedTextColor color = switch (entry.severity()) {

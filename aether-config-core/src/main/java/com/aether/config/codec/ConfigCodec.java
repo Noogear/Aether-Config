@@ -57,24 +57,42 @@ public interface ConfigCodec<T> {
     }
 
     static <T> ConfigCodec<T> oneOf(List<ConfigCodec<T>> candidates) {
+        return oneOf(candidates, null);
+    }
+
+    static <T> ConfigCodec<T> oneOf(List<ConfigCodec<T>> candidates, @org.jetbrains.annotations.Nullable Encoder<T> encoder) {
         List<ConfigCodec<T>> copy = List.copyOf(candidates);
-        return value -> {
-            List<String> errors = new ArrayList<>(copy.size());
-            for (ConfigCodec<T> candidate : copy) {
-                ConfigDiagnostics scratch = new ConfigDiagnostics();
-                ConfigValue probe = value.withDiagnostics(scratch);
-                try {
-                    T result = candidate.decode(probe);
-                    if (!scratch.hasErrors()) {
-                        value.diagnostics().addAll(scratch);
-                        return result;
+        return new ConfigCodec<>() {
+            @Override
+            public T decode(ConfigValue value) throws ConfigDecodeException {
+                List<String> errors = new ArrayList<>(copy.size());
+                for (ConfigCodec<T> candidate : copy) {
+                    ConfigDiagnostics scratch = new ConfigDiagnostics();
+                    ConfigValue probe = value.withDiagnostics(scratch);
+                    try {
+                        T result = candidate.decode(probe);
+                        if (!scratch.hasErrors()) {
+                            value.diagnostics().addAll(scratch);
+                            return result;
+                        }
+                        errors.add(scratch.formatAll());
+                    } catch (ConfigDecodeException ex) {
+                        errors.add(ex.getMessage());
                     }
-                    errors.add(scratch.formatAll());
-                } catch (ConfigDecodeException ex) {
-                    errors.add(ex.getMessage());
                 }
+                throw new ConfigDecodeException("No matching variant: " + String.join(" | ", errors));
             }
-            throw new ConfigDecodeException("No matching variant: " + String.join(" | ", errors));
+
+            @Override
+            public ConfigNode encode(T value, CodecContext context) {
+                if (encoder != null) {
+                    return encoder.encode(value, context);
+                }
+                if (!copy.isEmpty()) {
+                    return copy.getFirst().encode(value, context);
+                }
+                return ConfigDocument.toNode(value);
+            }
         };
     }
 }

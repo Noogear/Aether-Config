@@ -99,9 +99,20 @@ public final class VersionManager {
             }
         }
 
+        int stampedVersion = desc.expectedVersion();
         if (chain != null && !chain.isEmpty()) {
             try {
-                chain.apply(document, actualVersion, desc.expectedVersion());
+                int reached = chain.apply(document, actualVersion, desc.expectedVersion());
+                if (reached < desc.expectedVersion()) {
+                    diagnostics.warn(
+                            DiagnosticCategory.MIGRATION,
+                            span,
+                            desc.key(),
+                            "Migration chain from v" + actualVersion + " to v" + desc.expectedVersion()
+                                    + " stopped at v" + reached + " due to missing migration step."
+                    );
+                    stampedVersion = reached;
+                }
             } catch (Exception ex) {
                 diagnostics.error(
                         DiagnosticCategory.MIGRATION,
@@ -113,13 +124,15 @@ public final class VersionManager {
             }
         }
 
-        document.setRaw(desc.key(), desc.expectedVersion());
-        diagnostics.info(
-                DiagnosticCategory.MIGRATION,
-                span,
-                desc.key(),
-                "Migrated configuration from v" + actualVersion + " to v" + desc.expectedVersion() + "."
-        );
-        return true;
+        document.setRaw(desc.key(), stampedVersion);
+        if (stampedVersion != actualVersion) {
+            diagnostics.info(
+                    DiagnosticCategory.MIGRATION,
+                    span,
+                    desc.key(),
+                    "Migrated configuration from v" + actualVersion + " to v" + stampedVersion + "."
+            );
+        }
+        return stampedVersion != actualVersion;
     }
 }

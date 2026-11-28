@@ -5,17 +5,27 @@ import com.aether.config.codec.ConfigCodec;
 import com.aether.config.diagnostic.ConfigDecodeException;
 import com.aether.config.node.ConfigNode;
 import com.aether.config.view.ConfigValue;
+import io.papermc.paper.registry.RegistryAccess;
+import io.papermc.paper.registry.RegistryKey;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
+import org.bukkit.Keyed;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Registry;
 import org.bukkit.Sound;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.block.Biome;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.EntityType;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.BlockVector;
+import org.bukkit.util.Vector;
 
 import java.util.Locale;
 import java.util.function.Supplier;
@@ -107,11 +117,86 @@ public final class PaperCodecs {
             (color, ctx) -> ConfigNode.ScalarNode.of(String.format("#%08X", color.asARGB()))
     );
 
+    public static final ConfigCodec<MessageTemplate> MESSAGE_TEMPLATE = ConfigCodec.of(
+            val -> {
+                if (val.isNull()) {
+                    return MessageTemplate.EMPTY;
+                }
+                String text = val.asString("");
+                return MessageTemplate.of(text != null ? text : "");
+            },
+            (tpl, ctx) -> ConfigNode.ScalarNode.of(tpl.raw())
+    );
+
+    public static final ConfigCodec<Key> ADVENTURE_KEY = ConfigCodec.of(
+            val -> {
+                String raw = val.asNonBlankString();
+                if (raw == null) {
+                    throw new ConfigDecodeException("missing Adventure Key");
+                }
+                try {
+                    return Key.key(raw.trim().toLowerCase(Locale.ROOT));
+                } catch (RuntimeException ex) {
+                    throw new ConfigDecodeException("invalid Adventure Key '" + raw + "'", ex);
+                }
+            },
+            (key, ctx) -> ConfigNode.ScalarNode.of(key.asString())
+    );
+
+    public static final ConfigCodec<Vector> VECTOR = ConfigCodec.of(
+            PaperCodecs::decodeVector,
+            (v, ctx) -> ConfigNode.ScalarNode.of(v.getX() + "," + v.getY() + "," + v.getZ())
+    );
+
+    public static final ConfigCodec<BlockVector> BLOCK_VECTOR = ConfigCodec.of(
+            val -> {
+                Vector v = decodeVector(val);
+                return new BlockVector(v.getBlockX(), v.getBlockY(), v.getBlockZ());
+            },
+            (v, ctx) -> ConfigNode.ScalarNode.of(v.getBlockX() + "," + v.getBlockY() + "," + v.getBlockZ())
+    );
+
     public static final ConfigCodec<Sound> SOUND = registryCodec(() -> Registry.SOUNDS, "sound");
 
     public static final ConfigCodec<PotionEffectType> POTION_EFFECT_TYPE = registryCodec(() -> Registry.MOB_EFFECT, "potion effect");
 
-    private static <T extends org.bukkit.Keyed> ConfigCodec<T> registryCodec(
+    public static final ConfigCodec<Attribute> ATTRIBUTE = registryCodec(() -> Registry.ATTRIBUTE, "attribute");
+
+    public static final ConfigCodec<Biome> BIOME = registryCodec(RegistryKey.BIOME, "biome");
+
+    public static final ConfigCodec<Enchantment> ENCHANTMENT = registryCodec(RegistryKey.ENCHANTMENT, "enchantment");
+
+    public static final ConfigCodec<EntityType> ENTITY_TYPE = ConfigCodec.of(
+            val -> {
+                String raw = val.asNonBlankString();
+                if (raw == null) {
+                    throw new ConfigDecodeException("missing entity type");
+                }
+                if (Bukkit.getServer() != null) {
+                    NamespacedKey exact = NamespacedKey.fromString(raw.toLowerCase(Locale.ROOT));
+                    EntityType matched = exact != null ? Registry.ENTITY_TYPE.get(exact) : null;
+                    if (matched != null) {
+                        return matched;
+                    }
+                }
+                String normalized = raw.trim().replace(':', '_').replace('-', '_').toUpperCase(Locale.ROOT);
+                if (normalized.startsWith("MINECRAFT_")) {
+                    normalized = normalized.substring("MINECRAFT_".length());
+                }
+                try {
+                    return EntityType.valueOf(normalized);
+                } catch (IllegalArgumentException ex) {
+                    throw new ConfigDecodeException("unknown Bukkit entity type '" + raw + "'");
+                }
+            },
+            (et, ctx) -> ConfigNode.ScalarNode.of(et.key().asString())
+    );
+
+    public static <T extends Keyed> ConfigCodec<T> registryCodec(RegistryKey<T> registryKey, String label) {
+        return registryCodec(() -> RegistryAccess.registryAccess().getRegistry(registryKey), label);
+    }
+
+    public static <T extends Keyed> ConfigCodec<T> registryCodec(
             Supplier<Registry<T>> registrySupplier,
             String label
     ) {
@@ -141,11 +226,43 @@ public final class PaperCodecs {
                 .register(Material.class, MATERIAL)
                 .register(Particle.class, PARTICLE)
                 .register(NamespacedKey.class, NAMESPACED_KEY)
+                .register(Key.class, ADVENTURE_KEY)
                 .register(Component.class, COMPONENT)
+                .register(MessageTemplate.class, MESSAGE_TEMPLATE)
                 .register(TextColor.class, TEXT_COLOR)
                 .register(Color.class, BUKKIT_COLOR)
+                .register(Vector.class, VECTOR)
+                .register(BlockVector.class, BLOCK_VECTOR)
                 .register(Sound.class, SOUND)
-                .register(PotionEffectType.class, POTION_EFFECT_TYPE);
+                .register(PotionEffectType.class, POTION_EFFECT_TYPE)
+                .register(Attribute.class, ATTRIBUTE)
+                .register(Biome.class, BIOME)
+                .register(Enchantment.class, ENCHANTMENT)
+                .register(EntityType.class, ENTITY_TYPE);
+    }
+
+    private static Vector decodeVector(ConfigValue val) {
+        if (val.node() instanceof ConfigNode.MapNode) {
+            var sec = val.asSection();
+            return new Vector(sec.getDouble("x", 0.0), sec.getDouble("y", 0.0), sec.getDouble("z", 0.0));
+        }
+        String raw = val.asNonBlankString();
+        if (raw == null) {
+            throw new ConfigDecodeException("missing vector");
+        }
+        String[] parts = raw.trim().split(",");
+        if (parts.length != 3) {
+            throw new ConfigDecodeException("invalid vector '" + raw + "' (expected 'x,y,z' or {x,y,z})");
+        }
+        try {
+            return new Vector(
+                    Double.parseDouble(parts[0].trim()),
+                    Double.parseDouble(parts[1].trim()),
+                    Double.parseDouble(parts[2].trim())
+            );
+        } catch (NumberFormatException ex) {
+            throw new ConfigDecodeException("invalid numeric vector '" + raw + "'", ex);
+        }
     }
 
     private static Color decodeBukkitColor(ConfigValue val) {
